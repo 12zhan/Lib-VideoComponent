@@ -97,7 +97,9 @@ public:
       : adapter_(&adapter),
         on_texture_(open.on_texture),
         on_status_(open.on_status),
-        source_uri_(open.source.uri.ToString()),
+        // MediaPlayer.setDataSource expects a bare path for local files, not a file: URI.
+        source_uri_(open.source.uri.Scheme() == "file" ? std::string{open.source.uri.Path()}
+                                                       : open.source.uri.ToString()),
         initial_playing_(open.options.auto_play),
         muted_(open.options.muted),
         loop_(open.options.loop) {}

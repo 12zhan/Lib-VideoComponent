@@ -9,7 +9,6 @@ import android.media.MediaPlayer;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
-import android.view.Surface;
 
 import java.nio.ByteBuffer;
 import java.util.Objects;
@@ -116,7 +115,7 @@ final class VideoPlayer {
         try {
             final ImageReader created = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 3);
             created.setOnImageAvailableListener(reader -> onImage(), handler);
-            preparedPlayer.setSurface(new Surface(created.getSurface()));
+            preparedPlayer.setSurface(created.getSurface());
             reader = created;
         } catch (Exception failure) {
             fail("frame surface failed: " + failure);

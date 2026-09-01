@@ -3,6 +3,13 @@ plugins {
 }
 
 def huxeruiProperty = { String name -> providers.gradleProperty(name).get() }
+def huxeruiLocalProperties = new Properties()
+file("../local.properties").withInputStream { huxeruiLocalProperties.load(it) }
+// Hosts that cannot run the NDK's prebuilt toolchain (for example aarch64
+// Termux) build native libraries externally and package them from a jniLibs
+// directory configured through local.properties.
+def huxeruiPrebuiltNative = huxeruiLocalProperties.getProperty("huxeruiPrebuiltNative", "false").toBoolean()
+def huxeruiPrebuiltNativeLibs = huxeruiLocalProperties.getProperty("huxeruiPrebuiltNativeLibs", "")
 def huxeruiHome = rootProject.gradle.ext.huxeruiHome
 def huxeruiLibraries = rootProject.gradle.ext.huxeruiLibraries
 def huxeruiCompileSdk = huxeruiProperty("huxeruiCompileSdk").toInteger()
@@ -28,38 +35,49 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        externalNativeBuild {
-            cmake {
-                arguments "-DANDROID_STL=${huxeruiStl}",
-                        "-DHUXERUI_HOME=${huxeruiHome.absolutePath}"
+        if (!huxeruiPrebuiltNative) {
+            externalNativeBuild {
+                cmake {
+                    arguments "-DANDROID_STL=${huxeruiStl}",
+                            "-DHUXERUI_HOME=${huxeruiHome.absolutePath}"
+                }
             }
-        }
 
-        ndk {
-            abiFilters(*huxeruiAbis)
+            ndk {
+                abiFilters(*huxeruiAbis)
+            }
         }
     }
 
     buildTypes {
         debug {
-            externalNativeBuild {
-                cmake {
-                    arguments "-DHUXERUI_ANDROID_RESOURCE_OUTPUT_ROOT=${huxeruiDebugResourceRoot.absolutePath}"
+            if (!huxeruiPrebuiltNative) {
+                externalNativeBuild {
+                    cmake {
+                        arguments "-DHUXERUI_ANDROID_RESOURCE_OUTPUT_ROOT=${huxeruiDebugResourceRoot.absolutePath}"
+                    }
                 }
             }
         }
         release {
             minifyEnabled = false
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
-            externalNativeBuild {
-                cmake {
-                    arguments "-DHUXERUI_ANDROID_RESOURCE_OUTPUT_ROOT=${huxeruiReleaseResourceRoot.absolutePath}"
+            if (!huxeruiPrebuiltNative) {
+                externalNativeBuild {
+                    cmake {
+                        arguments "-DHUXERUI_ANDROID_RESOURCE_OUTPUT_ROOT=${huxeruiReleaseResourceRoot.absolutePath}"
+                    }
                 }
             }
         }
     }
 
     sourceSets {
+        main {
+            if (huxeruiPrebuiltNative && !huxeruiPrebuiltNativeLibs.isBlank()) {
+                jniLibs.srcDir new File(huxeruiPrebuiltNativeLibs)
+            }
+        }
         debug {
             assets.srcDir huxeruiDebugAssets
         }
@@ -73,9 +91,11 @@ android {
         targetCompatibility = JavaVersion.VERSION_1_8
     }
 
-    externalNativeBuild {
-        cmake {
-            path = file("../../../CMakeLists.txt")
+    if (!huxeruiPrebuiltNative) {
+        externalNativeBuild {
+            cmake {
+                path = file("../../../CMakeLists.txt")
+            }
         }
     }
 }
@@ -104,7 +124,9 @@ def registerHuxerUIResourceStaging = { String buildType, File resourceRoot, File
         return null
     }
     def verificationTask = tasks.register("verifyHuxerUI${capitalizedBuildType}Resources") {
-        dependsOn nativeTaskName
+        if (!huxeruiPrebuiltNative) {
+            dependsOn nativeTaskName
+        }
         doLast {
             if (resolveResourcePackage() == null) {
                 throw new GradleException("HuxerUI resource package is missing under ${resourceRoot}")

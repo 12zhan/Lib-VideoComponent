@@ -255,18 +255,25 @@ public:
     const huxerui::android::LocalRef<jobject> config(
         environment, static_cast<jobject>(environment->GetStaticObjectField(config_class.Get(), argb_field))
     );
-    huxerui::android::LocalRef<jobject> bitmap(
-        environment,
-        environment->CallStaticObjectMethod(bitmap_class.Get(), create_bitmap, width, height, config.Get())
-    );
-    if (ClearJavaException(environment) || !bitmap) {
-      ReportFailed("HuxerUI video bitmap allocation failed");
-      return;
-    }
 
+    // Rotate several bitmaps so a published frame is never mutated while the
+    // renderer still holds it; rewriting one shared bitmap races the draw pass.
+    constexpr std::size_t kBitmapRingSize = 4;
+    for (std::size_t index = 0; index < kBitmapRingSize; ++index) {
+      huxerui::android::LocalRef<jobject> bitmap(
+          environment,
+          environment->CallStaticObjectMethod(bitmap_class.Get(), create_bitmap, width, height, config.Get())
+      );
+      if (ClearJavaException(environment) || !bitmap) {
+        ReleaseFrameObjects(environment);
+        ReportFailed("HuxerUI video bitmap allocation failed");
+        return;
+      }
+      bitmaps_[index] = environment->NewGlobalRef(bitmap.Get());
+    }
     bitmap_class_ = static_cast<jclass>(environment->NewGlobalRef(bitmap_class.Get()));
     copy_pixels_ = environment->GetMethodID(bitmap_class_, "copyPixelsFromBuffer", "(Ljava/nio/Buffer;)V");
-    bitmap_ = environment->NewGlobalRef(bitmap.Get());
+    bitmap_index_ = 0;
     rgba_.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U, 0U);
 
     const huxerui::ExternalTexture texture = source_->Texture();
@@ -287,7 +294,7 @@ public:
     const std::uint8_t* v_plane = static_cast<const std::uint8_t*>(environment->GetDirectBufferAddress(v_buffer));
 
     const std::lock_guard lock(frame_mutex_);
-    if (closed_ || !source_.has_value() || bitmap_ == nullptr || copy_pixels_ == nullptr) {
+    if (closed_ || !source_.has_value() || bitmaps_[0] == nullptr || copy_pixels_ == nullptr) {
       return;
     }
     if (y_plane == nullptr || u_plane == nullptr || v_plane == nullptr) {
@@ -299,12 +306,14 @@ public:
         v_pixel_stride, width, height, rgba_.data()
     );
 
+    const jobject bitmap = bitmaps_[bitmap_index_];
+    bitmap_index_ = (bitmap_index_ + 1U) % std::size(bitmaps_);
     const jobject pixels = environment->NewDirectByteBuffer(rgba_.data(), static_cast<jlong>(rgba_.size()));
-    environment->CallVoidMethod(bitmap_, copy_pixels_, pixels);
+    environment->CallVoidMethod(bitmap, copy_pixels_, pixels);
     if (ClearJavaException(environment)) {
       return;
     }
-    source_->Publish(environment, bitmap_);
+    source_->Publish(environment, bitmap);
   }
 
   void OnStatus(JNIEnv* environment, jint code, jstring message) {
@@ -327,10 +336,13 @@ public:
 
 private:
   void ReleaseFrameObjects(JNIEnv* environment) noexcept {
-    if (bitmap_ != nullptr) {
-      environment->DeleteGlobalRef(bitmap_);
-      bitmap_ = nullptr;
+    for (jobject& bitmap : bitmaps_) {
+      if (bitmap != nullptr) {
+        environment->DeleteGlobalRef(bitmap);
+        bitmap = nullptr;
+      }
     }
+    bitmap_index_ = 0;
     if (bitmap_class_ != nullptr) {
       environment->DeleteGlobalRef(bitmap_class_);
       bitmap_class_ = nullptr;
@@ -368,7 +380,8 @@ private:
   std::mutex frame_mutex_;
   std::optional<huxerui::android::ExternalTextureSource> source_;
   jclass bitmap_class_ = nullptr;
-  jobject bitmap_ = nullptr;
+  jobject bitmaps_[4] = {};
+  std::size_t bitmap_index_ = 0;
   jmethodID copy_pixels_ = nullptr;
   std::vector<std::uint8_t> rgba_;
 

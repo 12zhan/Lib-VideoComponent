@@ -1,14 +1,12 @@
 #include <huxerui/huxerui.h>
 #include <lib_video_component/lib_video_component.h>
 
-#include <app_resources.h>
-
-#include <optional>
 #include <string>
 #include <utility>
 
 using namespace huxerui;
 using lib_video_component::Video;
+using lib_video_component::VideoController;
 using lib_video_component::VideoEvents;
 using lib_video_component::VideoOptions;
 using lib_video_component::VideoSource;
@@ -17,7 +15,7 @@ using lib_video_component::VideoStatus;
 
 namespace {
 
-const VideoSource& RemoteSampleSource() {
+const VideoSource& SampleSource() {
   static const VideoSource source{
       Uri{"https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"},
   };
@@ -42,79 +40,37 @@ const char* StatusLabel(VideoStatus status) {
   return "Idle";
 }
 
-// Reads the native crash report written by the video backend, if one exists.
-std::optional<std::string> ReadCrashReport(const File& cache_directory) {
-  const File report = File(cache_directory, "native_crash.txt");
-  if (!report.Exists()) {
-    return std::nullopt;
-  }
-  const FileResult<Bytes> bytes = report.ReadBytes();
-  if (!bytes.Succeeded()) {
-    return std::nullopt;
-  }
-  std::string text;
-  text.reserve(bytes.Value().size());
-  for (const std::byte value : bytes.Value()) {
-    text.push_back(static_cast<char>(value));
-  }
-  return text;
-}
-
-// Extracts the packaged sample video into the cache directory once, then
-// mounts the player on the local file. Falls back to the remote sample when
-// the extraction cannot write the cache copy.
+// Exercises the component framework: styles, events, controlled play state,
+// and a transport controller. The backend is a stub, so the surface shows the
+// styled placeholder and one Failed status transition.
 [[huxerui::composable]]
 View PlayerSection() {
   auto playing = UseState(true);
-  auto status = UseState(std::string("Preparing"));
-  auto source = UseState(std::optional<VideoSource>{});
-  auto files = UseService<FileSystem>();
-  auto tasks = UseTaskScope();
-  const RawAsset packaged = UseRawResource(app::raw::kuaishou_mp4);
-
-  Lifecycle([source, files, tasks, packaged] {
-    tasks.Launch([source, files, packaged]() -> Task<void> {
-      const File target = File(files->Directories().cache_directory, "kuaishou.mp4");
-      if (!target.Exists()) {
-        const auto bytes = packaged.Bytes();
-        const bool written = co_await target.WriteBytesAsync(Bytes(bytes.begin(), bytes.end()));
-        if (!written) {
-          source = VideoSource{RemoteSampleSource()};
-          co_return;
-        }
-      }
-      source = VideoSource{target.ToUri()};
-    });
-  });
-
-  View player = Text(status.Get()).With(Frame{.height = 220.0F});
-  if (const std::optional<VideoSource> current = source.Get(); current.has_value()) {
-    player = Video(*current, playing, VideoOptions{.auto_play = true, .fit = ImageFit::Contain})
-                 .On<VideoEvents::StateChanged>([status](const VideoStateEvent& event) {
-                   std::string label = StatusLabel(event.status);
-                   if (!event.error.empty()) {
-                     label += ": " + event.error;
-                   }
-                   status = std::move(label);
-                 })
-                 .With(Frame{.height = 220.0F}, CornerRadius(8.0F), ClipChildren());
-  }
-
-  std::optional<std::string> crash_report = ReadCrashReport(files->Directories().cache_directory);
-  View crash_view = Spacer();
-  if (crash_report.has_value() && !crash_report->empty()) {
-    crash_view = ScrollView {
-      Text(*crash_report).With(Foreground(Color::Rgb(190, 40, 40))),
-    }.With(Frame{.height = 140.0F});
-  }
+  auto status = UseState(std::string("Idle"));
+  auto duration = UseState(0.0);
+  VideoController controller;
 
   return Column {
-    std::move(crash_view),
-    std::move(player),
+    Video(SampleSource(), controller, playing, VideoOptions{.auto_play = true, .fit = ImageFit::Contain})
+        .On<VideoEvents::StateChanged>([status](const VideoStateEvent& event) {
+          std::string label = StatusLabel(event.status);
+          if (!event.error.empty()) {
+            label += ": " + event.error;
+          }
+          status = std::move(label);
+        })
+        .On<VideoEvents::Prepared>([duration](const lib_video_component::VideoPreparedEvent& event) {
+          duration = event.duration_seconds;
+        })
+        .With(Frame{.height = 220.0F}, CornerRadius(8.0F), ClipChildren()),
     Button(playing.Get() ? std::string("Pause") : std::string("Play")).OnClick([playing] {
       playing = !playing.Get();
     }),
-    Text(status.Get()),
+    Button("Restart").OnClick([controller] {
+      controller.SeekTo(0.0);
+    }),
+    Text::Format("status: {}", status),
+    Text::Format("duration: {:.1f}s (0.0 until a backend reports metadata)", duration),
   }.With(Spacing(12.0F), Padding(16.0F), CrossAlign(CrossAxisAlignment::Stretch));
 }
 

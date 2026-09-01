@@ -5,6 +5,19 @@
 
 #include "video_session.h"
 
+namespace lib_video_component::detail {
+
+// Grants the component implementation typed access to controller state.
+struct VideoControllerAccess {
+  static std::shared_ptr<VideoControllerState> Get(const VideoController& controller) {
+    return std::const_pointer_cast<VideoControllerState>(
+        std::static_pointer_cast<const VideoControllerState>(controller.state_)
+    );
+  }
+};
+
+} // namespace lib_video_component::detail
+
 namespace lib_video_component {
 
 using namespace huxerui;
@@ -29,27 +42,26 @@ const char* StatusLabel(VideoStatus status) {
   return "Idle";
 }
 
-View PlaceholderSurface(VideoStatus status, const std::string& error) {
-  const Color background = Color::Rgb(12, 12, 14);
-  const Color foreground = Color::Rgb(200, 203, 208);
-
-  Column content{
-      Text(status == VideoStatus::Failed && !error.empty() ? error : StatusLabel(status), TextRole::Label)
-          .With(Foreground(foreground)),
-  };
-  return std::move(content)
-      .With(
-          Background(background),
-          MainAlign(MainAxisAlignment::Center),
-          CrossAlign(CrossAxisAlignment::Center),
-          Padding(16.0F)
-      );
+// Placeholder surface shown while no frame is available. Uses the configured
+// surface and status styling so the skeleton matches the final presentation.
+View PlaceholderSurface(const VideoOptions& options, VideoStatus status, const std::string& error) {
+  const std::string label = status == VideoStatus::Failed && !error.empty() ? error : StatusLabel(status);
+  return Column {
+      Text(label, TextRole::Label).With(Foreground(options.status_color)),
+  }.With(
+      Background(options.surface_color),
+      MainAlign(MainAxisAlignment::Center),
+      CrossAlign(CrossAxisAlignment::Center),
+      Padding(16.0F)
+  );
 }
 
-// One shared body for both Video overloads. The optional playing state selects
-// controlled mode; otherwise the component owns its play state.
+// One shared body for all Video overloads. The optional playing state selects
+// controlled mode; the optional controller wires transport commands.
 [[huxerui::composable]]
-View VideoImpl(const VideoSource& source, const State<bool>* playing, VideoOptions options) {
+View VideoImpl(
+    const VideoSource& source, const State<bool>* playing, const VideoController* controller, VideoOptions options
+) {
   auto texture = UseState(ExternalTexture{});
   auto status = UseState(VideoStatus::Idle);
   auto error = UseState(std::string{});
@@ -61,7 +73,12 @@ View VideoImpl(const VideoSource& source, const State<bool>* playing, VideoOptio
 
   const bool initial_playing = playing != nullptr ? playing->Get() : internal_playing.Get();
 
-  detail::VideoOpenOptions open{source, options, nullptr, nullptr};
+  // Capture controller state by value; the caller's VideoController may be a
+  // temporary that dies right after this declaration is constructed.
+  const std::shared_ptr<detail::VideoControllerState> controller_state =
+      controller != nullptr ? detail::VideoControllerAccess::Get(*controller) : nullptr;
+
+  detail::VideoOpenOptions open{source, options, controller_state, nullptr, nullptr, nullptr};
   open.options.auto_play = initial_playing;
   open.on_texture = [texture](ExternalTexture value) {
     texture = std::move(value);
@@ -74,13 +91,27 @@ View VideoImpl(const VideoSource& source, const State<bool>* playing, VideoOptio
     }
     events.Emit<VideoEvents::StateChanged>(VideoStateEvent{next, std::move(message)});
   };
+  open.on_prepared = [events, controller_state](double width, double height, double duration_seconds) {
+    if (controller_state != nullptr) {
+      controller_state->duration.store(duration_seconds);
+    }
+    events.Emit<VideoEvents::Prepared>(VideoPreparedEvent{width, height, duration_seconds});
+  };
 
   // Open one playback session for this component; the source selects it.
   Lifecycle(
       [open, session]() mutable {
         auto handle = OpenPlatformModule<std::shared_ptr<detail::VideoSession>>(detail::kVideoPlatformModule, open);
         session = handle;
-        return [handle] {
+        if (open.controller != nullptr) {
+          std::lock_guard lock(open.controller->mutex);
+          open.controller->session = handle;
+        }
+        return [open, handle] {
+          if (open.controller != nullptr) {
+            std::lock_guard lock(open.controller->mutex);
+            open.controller->session.reset();
+          }
           handle->Close();
         };
       },
@@ -113,17 +144,50 @@ View VideoImpl(const VideoSource& source, const State<bool>* playing, VideoOptio
   if (current_texture.HasValue()) {
     return Image(current_texture).Fit(options.fit);
   }
-  return PlaceholderSurface(status.Get(), error.Get());
+  return PlaceholderSurface(options, status.Get(), error.Get());
 }
 
 } // namespace
 
+VideoController::VideoController() : state_(std::make_shared<detail::VideoControllerState>()) {}
+
+void VideoController::SeekTo(double position_seconds) const {
+  const auto state = std::const_pointer_cast<detail::VideoControllerState>(
+      std::static_pointer_cast<const detail::VideoControllerState>(state_)
+  );
+  std::lock_guard lock(state->mutex);
+  if (const std::shared_ptr<detail::VideoSession> session = state->session.lock()) {
+    session->SeekTo(position_seconds);
+  }
+}
+
+double VideoController::Position() const {
+  return static_cast<const detail::VideoControllerState*>(state_.get())->position.load();
+}
+
+double VideoController::Duration() const {
+  return static_cast<const detail::VideoControllerState*>(state_.get())->duration.load();
+}
+
+bool VideoController::operator==(const VideoController& other) const noexcept {
+  return state_ == other.state_;
+}
+
 View Video(const VideoSource& source, VideoOptions options) {
-  return VideoImpl(source, nullptr, std::move(options));
+  return VideoImpl(source, nullptr, nullptr, std::move(options));
 }
 
 View Video(const VideoSource& source, const State<bool>& playing, VideoOptions options) {
-  return VideoImpl(source, &playing, std::move(options));
+  return VideoImpl(source, &playing, nullptr, std::move(options));
+}
+
+View Video(const VideoSource& source, const VideoController& controller, VideoOptions options) {
+  return VideoImpl(source, nullptr, &controller, std::move(options));
+}
+
+View Video(const VideoSource& source, const VideoController& controller, const State<bool>& playing,
+           VideoOptions options) {
+  return VideoImpl(source, &playing, &controller, std::move(options));
 }
 
 } // namespace lib_video_component

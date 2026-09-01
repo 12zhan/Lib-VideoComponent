@@ -14,6 +14,7 @@ namespace {
 class StubVideoSession final : public VideoSession {
 public:
   void SetPlaying(bool) override {}
+  void SeekTo(double) override {}
   void Close() noexcept override {}
 };
 

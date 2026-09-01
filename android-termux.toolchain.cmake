@@ -25,4 +25,4 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
 # Android platform runtime libraries used by the shared backends.
-set(CMAKE_SHARED_LINKER_FLAGS_INIT "-landroid -llog -ljnigraphics -lmediandk")
+set(CMAKE_SHARED_LINKER_FLAGS_INIT "-landroid -llog -ljnigraphics -lmediandk -Wl,--no-undefined")

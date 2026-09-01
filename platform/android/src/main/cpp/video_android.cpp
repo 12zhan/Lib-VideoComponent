@@ -17,6 +17,8 @@
 
 #include "video_session.h"
 
+#include "crash_report.h"
+
 namespace lib_video_component::detail {
 namespace {
 
@@ -382,6 +384,40 @@ std::shared_ptr<AndroidVideoSession> LockedBridge(jlong bridge) {
   return state != nullptr ? state->lock() : nullptr;
 }
 
+// Resolves the application cache directory once so the process-wide native
+// crash reporter has a writable target; failure leaves the reporter off.
+void InstallProcessCrashReporter(JNIEnv* environment, jobject context) {
+  const jclass context_class = environment->GetObjectClass(context);
+  const jmethodID get_cache_dir = environment->GetMethodID(context_class, "getCacheDir", "()Ljava/io/File;");
+  if (ClearJavaException(environment) || get_cache_dir == nullptr) {
+    return;
+  }
+  const huxerui::android::LocalRef<jobject> cache_file(
+      environment, environment->CallObjectMethod(context, get_cache_dir)
+  );
+  if (ClearJavaException(environment) || !cache_file) {
+    return;
+  }
+  const jclass file_class = environment->GetObjectClass(cache_file.Get());
+  const jmethodID get_path = environment->GetMethodID(file_class, "getAbsolutePath", "()Ljava/lang/String;");
+  if (ClearJavaException(environment) || get_path == nullptr) {
+    return;
+  }
+  const huxerui::android::LocalRef<jstring> path(
+      environment, static_cast<jstring>(environment->CallObjectMethod(cache_file.Get(), get_path))
+  );
+  if (ClearJavaException(environment) || !path) {
+    return;
+  }
+  const char* characters = environment->GetStringUTFChars(path.Get(), nullptr);
+  if (characters == nullptr) {
+    ClearJavaException(environment);
+    return;
+  }
+  InstallCrashReporter(characters);
+  environment->ReleaseStringUTFChars(path.Get(), characters);
+}
+
 } // namespace
 
 void InstallVideoPlatformModule(huxerui::RootContext& root) {
@@ -390,6 +426,7 @@ void InstallVideoPlatformModule(huxerui::RootContext& root) {
       huxerui::android::PlatformModuleFactory<std::shared_ptr<VideoSession>, VideoOpenOptions>{
           .create = [](huxerui::PlatformAdapter& adapter, JNIEnv* environment, jobject context,
                        const VideoOpenOptions& open) {
+              InstallProcessCrashReporter(environment, context);
               auto session = std::make_shared<AndroidVideoSession>(adapter, open);
               session->Initialize(environment, context);
               return std::static_pointer_cast<VideoSession>(session);

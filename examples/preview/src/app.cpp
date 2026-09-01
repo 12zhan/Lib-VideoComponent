@@ -1,6 +1,8 @@
 #include <huxerui/huxerui.h>
 #include <lib_video_component/lib_video_component.h>
 
+#include <app_resources.h>
+
 #include <string>
 #include <utility>
 
@@ -14,7 +16,7 @@ using lib_video_component::VideoStatus;
 
 namespace {
 
-const VideoSource& SampleSource() {
+const VideoSource& RemoteSampleSource() {
   static const VideoSource source{
       Uri{"https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"},
   };
@@ -39,13 +41,33 @@ const char* StatusLabel(VideoStatus status) {
   return "Idle";
 }
 
+// Extracts the packaged sample video into the cache directory once, then
+// switches playback to the local file. Falls back to the remote sample.
 [[huxerui::composable]]
 View PlayerSection() {
   auto playing = UseState(false);
   auto status = UseState(std::string("Idle"));
+  auto source = UseState(VideoSource{RemoteSampleSource()});
+  auto files = UseService<FileSystem>();
+  auto tasks = UseTaskScope();
+  const RawAsset packaged = UseRawResource(app::raw::kuaishou_mp4);
+
+  Lifecycle([source, files, tasks, packaged] {
+    tasks.Launch([source, files, packaged]() -> Task<void> {
+      const File target = File(files->Directories().cache_directory, "kuaishou.mp4");
+      if (!target.Exists()) {
+        const auto bytes = packaged.Bytes();
+        const bool written = co_await target.WriteBytesAsync(Bytes(bytes.begin(), bytes.end()));
+        if (!written) {
+          co_return;
+        }
+      }
+      source = VideoSource{target.ToUri()};
+    });
+  });
 
   return Column {
-    Video(SampleSource(), playing, VideoOptions{.auto_play = true, .fit = ImageFit::Contain})
+    Video(source.Get(), playing, VideoOptions{.auto_play = true, .fit = ImageFit::Contain})
         .On<VideoEvents::StateChanged>([status](const VideoStateEvent& event) {
           std::string label = StatusLabel(event.status);
           if (!event.error.empty()) {

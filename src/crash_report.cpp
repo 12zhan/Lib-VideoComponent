@@ -3,14 +3,14 @@
 #include "crash_report.h"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdio>
-#include <cstring>
 
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <ucontext.h>
 #include <unistd.h>
-#include <unwind.h>
 
 namespace lib_video_component::detail {
 namespace {
@@ -18,47 +18,65 @@ namespace {
 std::atomic<bool> installed{false};
 char crash_path[320] = {};
 
-struct BacktraceState {
-  void** frames;
-  int capacity;
-  int size = 0;
-};
-
-_Unwind_Reason_Code CaptureFrame(_Unwind_Context* context, void* state_context) {
-  auto* state = static_cast<BacktraceState*>(state_context);
-  const uintptr_t pc = _Unwind_GetIP(context);
-  if (state->size < state->capacity && pc != 0) {
-    state->frames[state->size++] = reinterpret_cast<void*>(pc);
-  }
-  return _URC_NO_REASON;
+// Strips a PAC signature from a code pointer on arm64.
+inline uintptr_t StripPac(uintptr_t address) {
+  return address & 0x0000FFFFFFFFFFFFULL;
 }
 
-// Async-signal context: only raw open/write/close and reentrant helpers run here.
-void CrashHandler(int signal_number, siginfo_t* info, void*) {
-  void* frames[40];
-  BacktraceState state{frames, 40};
-  _Unwind_Backtrace(CaptureFrame, &state);
+// Async-signal context: raw syscalls and bounded stack walking only.
+void CrashHandler(int signal_number, siginfo_t* info, void* context) {
+  uintptr_t frames[32];
+  int size = 0;
 
-  char buffer[6144];
+  const ucontext_t* registers = static_cast<const ucontext_t*>(context);
+  if (registers != nullptr) {
+    if (registers->uc_mcontext.pc != 0) {
+      frames[size++] = StripPac(registers->uc_mcontext.pc);
+    }
+    if (registers->uc_mcontext.regs[30] != 0) {
+      frames[size++] = StripPac(registers->uc_mcontext.regs[30]);
+    }
+    // Walk the frame-pointer chain; it grows toward higher addresses.
+    uintptr_t frame_pointer = registers->uc_mcontext.regs[29];
+    for (int step = 0; step < 24 && size < 32; ++step) {
+      if (frame_pointer == 0 || (frame_pointer & 0x7U) != 0 || frame_pointer > 0x7FFFFFFFFFFFULL) {
+        break;
+      }
+      const uintptr_t* frame = reinterpret_cast<const uintptr_t*>(frame_pointer);
+      const uintptr_t next = frame[0];
+      const uintptr_t return_address = frame[1];
+      if (next <= frame_pointer || next > 0x7FFFFFFFFFFFULL) {
+        break;
+      }
+      if (return_address != 0) {
+        frames[size++] = StripPac(return_address);
+      }
+      frame_pointer = next;
+    }
+  }
+
+  char buffer[5120];
   int offset = snprintf(
       buffer, sizeof(buffer), "signal %d code %d fault_addr %p tid %d\n", signal_number,
       info != nullptr ? info->si_code : 0, info != nullptr ? info->si_addr : nullptr, gettid()
   );
-  for (int index = 0; index < state.size && offset < static_cast<int>(sizeof(buffer)) - 200; ++index) {
-    void* address = frames[index];
-    Dl_info library{};
+  for (int index = 0; index < size && offset < static_cast<int>(sizeof(buffer)) - 192; ++index) {
+    void* address = reinterpret_cast<void*>(frames[index]);
+    Dl_info library {};
     if (dladdr(address, &library) != 0 && library.dli_fname != nullptr) {
       const char* separator = strrchr(library.dli_fname, '/');
       const char* file_name = separator != nullptr ? separator + 1 : library.dli_fname;
+      const uintptr_t relative = reinterpret_cast<uintptr_t>(address) -
+                                 reinterpret_cast<uintptr_t>(library.dli_fbase);
       if (library.dli_sname != nullptr) {
         offset += snprintf(
-            buffer + offset, sizeof(buffer) - offset, "#%02d pc %p  %s(%s+%ld)\n", index, address, file_name,
-            library.dli_sname, static_cast<long>(reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(library.dli_saddr))
+            buffer + offset, sizeof(buffer) - offset, "#%02d pc %p  %s(%s)\n", index, address, file_name,
+            library.dli_sname
         );
       } else {
         offset += snprintf(
-            buffer + offset, sizeof(buffer) - offset, "#%02d pc %p  %s+%lx\n", index, address, file_name,
-            static_cast<unsigned long>(reinterpret_cast<char*>(address) - reinterpret_cast<char*>(library.dli_fbase))
+            buffer + offset, sizeof(buffer) - offset, "#%02d pc %p  %s+0x%lx\n", index, address, file_name,
+            static_cast<unsigned long>(relative)
         );
       }
     } else {

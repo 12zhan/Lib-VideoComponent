@@ -205,10 +205,15 @@ public:
       ClearJavaException(environment);
       environment->DeleteGlobalRef(player);
     }
-    if (bridge_ != nullptr) {
-      delete bridge_;
-      bridge_ = nullptr;
-    }
+    // bridge_ stays allocated until Java confirms shutdown through
+    // OnDestroyed; late player-thread callbacks may still dereference it.
+  }
+
+  void OnDestroyed() noexcept {
+    // Runs on the player thread after release() finished; no further native
+    // callbacks can arrive, so the bridge can finally be freed.
+    delete bridge_;
+    bridge_ = nullptr;
   }
 
   // JNI entry points invoked from the Java player thread.
@@ -431,5 +436,13 @@ Java_com_example_libvideocomponent_VideoPlayer_nativeStatus(JNIEnv* environment,
       session->OnStatus(environment, status, message);
     }
   } catch (...) {
+  }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_libvideocomponent_VideoPlayer_nativeDestroyed(JNIEnv*, jclass, jlong bridge) {
+  // The Java player finished release(); its bridge pointer is never used again.
+  if (const auto session = lib_video_component::detail::LockedBridge(bridge)) {
+    session->OnDestroyed();
   }
 }

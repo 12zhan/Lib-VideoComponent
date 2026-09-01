@@ -178,11 +178,13 @@ final class VideoPlayer {
         }
         try {
             final Image.Plane[] planes = image.getPlanes();
+            // slice() re-bases each plane buffer at its current position, so
+            // native code sees the first pixel regardless of device layout.
             nativeFrame(
                     bridge,
-                    planes[0].getBuffer(),
-                    planes[1].getBuffer(),
-                    planes[2].getBuffer(),
+                    planes[0].getBuffer().slice(),
+                    planes[1].getBuffer().slice(),
+                    planes[2].getBuffer().slice(),
                     planes[0].getRowStride(),
                     planes[1].getRowStride(),
                     planes[2].getRowStride(),
@@ -212,6 +214,8 @@ final class VideoPlayer {
             }
             player = null;
         }
+        // No further native callbacks can arrive after this point.
+        nativeDestroyed(bridge);
         if (Looper.myLooper() == thread.getLooper()) {
             Looper.myLooper().quitSafely();
         }
@@ -242,6 +246,8 @@ final class VideoPlayer {
             int height);
 
     private static native void nativeStatus(long bridge, int status, String message);
+
+    private static native void nativeDestroyed(long bridge);
 
     static {
         // The hosting library loads with the HuxerUI runtime; no extra loader needed.

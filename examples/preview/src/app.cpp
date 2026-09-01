@@ -3,6 +3,7 @@
 
 #include <app_resources.h>
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -42,12 +43,13 @@ const char* StatusLabel(VideoStatus status) {
 }
 
 // Extracts the packaged sample video into the cache directory once, then
-// switches playback to the local file. Falls back to the remote sample.
+// mounts the player on the local file. Falls back to the remote sample when
+// the extraction cannot write the cache copy.
 [[huxerui::composable]]
 View PlayerSection() {
-  auto playing = UseState(false);
-  auto status = UseState(std::string("Idle"));
-  auto source = UseState(VideoSource{RemoteSampleSource()});
+  auto playing = UseState(true);
+  auto status = UseState(std::string("Preparing"));
+  auto source = UseState(std::optional<VideoSource>{});
   auto files = UseService<FileSystem>();
   auto tasks = UseTaskScope();
   const RawAsset packaged = UseRawResource(app::raw::kuaishou_mp4);
@@ -59,6 +61,7 @@ View PlayerSection() {
         const auto bytes = packaged.Bytes();
         const bool written = co_await target.WriteBytesAsync(Bytes(bytes.begin(), bytes.end()));
         if (!written) {
+          source = VideoSource{RemoteSampleSource()};
           co_return;
         }
       }
@@ -66,16 +69,21 @@ View PlayerSection() {
     });
   });
 
+  View player = Text(status.Get()).With(Frame{.height = 220.0F});
+  if (const std::optional<VideoSource> current = source.Get(); current.has_value()) {
+    player = Video(*current, playing, VideoOptions{.auto_play = true, .fit = ImageFit::Contain})
+                 .On<VideoEvents::StateChanged>([status](const VideoStateEvent& event) {
+                   std::string label = StatusLabel(event.status);
+                   if (!event.error.empty()) {
+                     label += ": " + event.error;
+                   }
+                   status = std::move(label);
+                 })
+                 .With(Frame{.height = 220.0F}, CornerRadius(8.0F), ClipChildren());
+  }
+
   return Column {
-    Video(source.Get(), playing, VideoOptions{.auto_play = true, .fit = ImageFit::Contain})
-        .On<VideoEvents::StateChanged>([status](const VideoStateEvent& event) {
-          std::string label = StatusLabel(event.status);
-          if (!event.error.empty()) {
-            label += ": " + event.error;
-          }
-          status = std::move(label);
-        })
-        .With(Frame{.height = 220.0F}, CornerRadius(8.0F), ClipChildren()),
+    std::move(player),
     Button(playing.Get() ? std::string("Pause") : std::string("Play")).OnClick([playing] {
       playing = !playing.Get();
     }),

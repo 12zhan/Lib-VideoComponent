@@ -1,6 +1,7 @@
 #include <huxerui/huxerui.h>
 #include <lib_video_component/lib_video_component.h>
 
+#include <cstdio>
 #include <string>
 #include <utility>
 
@@ -43,6 +44,13 @@ const char* StatusLabel(VideoStatus status) {
 // Exercises the component framework: styles, events, controlled play state,
 // and a transport controller. The backend is a stub, so the surface shows the
 // styled placeholder and one Failed status transition.
+// Text::Format placeholders support only {}, so render decimals up front.
+std::string FormatSeconds(double value) {
+  char buffer[32];
+  std::snprintf(buffer, sizeof(buffer), "%.1f", value);
+  return buffer;
+}
+
 [[huxerui::composable]]
 View PlayerSection() {
   auto playing = UseState(true);
@@ -70,7 +78,7 @@ View PlayerSection() {
       controller.SeekTo(0.0);
     }),
     Text::Format("status: {}", status),
-    Text::Format("duration: {:.1f}s (0.0 until a backend reports metadata)", duration),
+    Text::Format("duration: {}s (0.0 until a backend reports metadata)", FormatSeconds(duration.Get())),
   }.With(Spacing(12.0F), Padding(16.0F), CrossAlign(CrossAxisAlignment::Stretch));
 }
 

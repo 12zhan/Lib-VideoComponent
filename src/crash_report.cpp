@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 
 #include <dlfcn.h>
 #include <fcntl.h>

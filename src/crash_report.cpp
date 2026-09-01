@@ -114,6 +114,39 @@ void InstallCrashReporter(const char* cache_directory) {
   sigaction(SIGBUS, &action, nullptr);
 }
 
+
+void InstallCrashReporterFromContext(JNIEnv* environment, jobject context) {
+  static std::atomic<bool> from_context_installed{false};
+  if (from_context_installed.exchange(true)) {
+    return;
+  }
+  const jclass context_class = environment->GetObjectClass(context);
+  const jmethodID get_cache_dir = environment->GetMethodID(context_class, "getCacheDir", "()Ljava/io/File;");
+  if (get_cache_dir == nullptr) {
+    return;
+  }
+  const jobject cache_file = environment->CallObjectMethod(context, get_cache_dir);
+  if (environment->ExceptionCheck() || cache_file == nullptr) {
+    environment->ExceptionClear();
+    return;
+  }
+  const jclass file_class = environment->GetObjectClass(cache_file);
+  const jmethodID get_path = environment->GetMethodID(file_class, "getAbsolutePath", "()Ljava/lang/String;");
+  const jstring path = get_path != nullptr
+                           ? static_cast<jstring>(environment->CallObjectMethod(cache_file, get_path))
+                           : nullptr;
+  if (environment->ExceptionCheck() || path == nullptr) {
+    environment->ExceptionClear();
+    return;
+  }
+  const char* characters = environment->GetStringUTFChars(path, nullptr);
+  if (characters != nullptr) {
+    InstallCrashReporter(characters);
+    environment->ReleaseStringUTFChars(path, characters);
+  }
+}
+
 } // namespace lib_video_component::detail
+
 
 #endif

@@ -244,7 +244,8 @@ private:
     int32_t width = 0;
     int32_t height = 0;
     if (!AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_WIDTH, &width) ||
-        !AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_HEIGHT, &height) || width <= 0 || height <= 0) {
+        !AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_HEIGHT, &height) || width <= 0 || height <= 0 ||
+        width > 8192 || height > 8192) {
       ReportStatus(5, "the video track has no usable dimensions");
       return false;
     }
@@ -401,11 +402,16 @@ private:
     pause_shift_ = 0;
   }
 
+  // Every decoder-provided value is hostile: the frame is validated against
+  // the plane lengths and the rgba_ allocation, and rejected when anything
+  // would read or write out of bounds.
   void PublishLatestImage() {
     AImage* image = nullptr;
     if (AImageReader_acquireLatestImage(image_reader_, &image) != AMEDIA_OK || image == nullptr) {
       return;
     }
+    int32_t image_width = 0;
+    int32_t image_height = 0;
     int32_t y_stride = 0;
     int32_t u_stride = 0;
     int32_t v_stride = 0;
@@ -419,6 +425,7 @@ private:
     int32_t u_length = 0;
     int32_t v_length = 0;
     const bool planes =
+        AImage_getWidth(image, &image_width) == AMEDIA_OK && AImage_getHeight(image, &image_height) == AMEDIA_OK &&
         AImage_getPlaneRowStride(image, 0, &y_stride) == AMEDIA_OK &&
         AImage_getPlaneRowStride(image, 1, &u_stride) == AMEDIA_OK &&
         AImage_getPlaneRowStride(image, 2, &v_stride) == AMEDIA_OK &&
@@ -428,11 +435,43 @@ private:
         AImage_getPlaneData(image, 0, &y_data, &y_length) == AMEDIA_OK &&
         AImage_getPlaneData(image, 1, &u_data, &u_length) == AMEDIA_OK &&
         AImage_getPlaneData(image, 2, &v_data, &v_length) == AMEDIA_OK;
-    if (planes) {
-      PublishFrame(y_data, u_data, v_data, y_stride, u_stride, v_stride, y_pixel, u_pixel, v_pixel, frame_width_,
-                   frame_height_);
+
+    if (planes && PlaneCoversFrame(
+                      image_width, image_height, y_stride, u_stride, v_stride, y_pixel, u_pixel, v_pixel, y_length,
+                      u_length, v_length
+                  )) {
+      // The converted frame must fit the rgba_ allocation taken from the
+      // track dimensions; mismatched decoder output is skipped, not trusted.
+      const int width = std::min(image_width, frame_width_);
+      const int height = std::min(image_height, frame_height_);
+      if (width > 0 && height > 0) {
+        PublishFrame(
+            y_data, u_data, v_data, y_stride, u_stride, v_stride, y_pixel, u_pixel, v_pixel, width, height
+        );
+      }
     }
     AImage_delete(image);
+  }
+
+  // Confirms the plane buffers cover every byte the converter will touch.
+  static bool PlaneCoversFrame(
+      int width, int height, int y_stride, int u_stride, int v_stride, int y_pixel, int u_pixel, int v_pixel,
+      int32_t y_length, int32_t u_length, int32_t v_length
+  ) {
+    if (width <= 0 || height <= 0) {
+      return false;
+    }
+    if (y_stride <= 0 || u_stride <= 0 || v_stride <= 0 || y_pixel <= 0 || u_pixel <= 0 || v_pixel <= 0) {
+      return false;
+    }
+    const auto needed = [](int stride, int rows, int pixel, int columns) {
+      return static_cast<std::int64_t>(stride) * (rows - 1) + static_cast<std::int64_t>(pixel) * (columns - 1) + 1;
+    };
+    const int chroma_rows = (height + 1) / 2;
+    const int chroma_columns = (width + 1) / 2;
+    return needed(y_stride, height, y_pixel, width) <= y_length &&
+           needed(u_stride, chroma_rows, u_pixel, chroma_columns) <= u_length &&
+           needed(v_stride, chroma_rows, v_pixel, chroma_columns) <= v_length;
   }
 
   void PublishFrame(

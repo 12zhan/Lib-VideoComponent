@@ -3,6 +3,8 @@
 
 #include <app_resources.h>
 
+#include "crash_report.h"
+
 #include <cstdio>
 #include <optional>
 #include <string>
@@ -38,6 +40,25 @@ const char* StatusLabel(VideoStatus status) {
   return "Idle";
 }
 
+
+// Reads a previous crash report so failures surface without external logs.
+std::optional<std::string> ReadCrashReport(const File& cache_directory) {
+  const File report = File(cache_directory, "native_crash.txt");
+  if (!report.Exists()) {
+    return std::nullopt;
+  }
+  const FileResult<Bytes> bytes = report.ReadBytes();
+  if (!bytes.Succeeded()) {
+    return std::nullopt;
+  }
+  std::string text;
+  text.reserve(bytes.Value().size());
+  for (const std::byte value : bytes.Value()) {
+    text.push_back(static_cast<char>(value));
+  }
+  return text;
+}
+
 // Extracts the packaged sample video once and plays it back: cover decode,
 // frame pipeline, and the Video component in one page. Each stage reports
 // its own status so failures localize.
@@ -51,6 +72,9 @@ View PlayerProbe() {
   auto files = UseService<FileSystem>();
   auto tasks = UseTaskScope();
   const RawAsset video_resource = UseRawResource(app::raw::kuaishou_mp4);
+
+  lib_video_component::preview::InstallCrashReporter(files->Directories().cache_directory.Path().c_str());
+  const std::optional<std::string> crash_report = ReadCrashReport(files->Directories().cache_directory);
 
   Lifecycle([stage, cover, source, files, tasks, video_resource] {
     tasks.Launch([stage, cover, source, files, video_resource]() -> Task<void> {
@@ -95,7 +119,15 @@ View PlayerProbe() {
                       .With(Frame{.height = 220.0F}, CornerRadius(8.0F), ClipChildren());
   }
 
+  View crash_view = Spacer();
+  if (crash_report.has_value() && !crash_report->empty()) {
+    crash_view = ScrollView {
+      Text(*crash_report).With(Foreground(Color::Rgb(190, 40, 40))),
+    }.With(Frame{.height = 150.0F});
+  }
+
   return Column {
+    std::move(crash_view),
     Row {
       std::move(cover_view),
       Column {

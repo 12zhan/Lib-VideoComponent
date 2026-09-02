@@ -8,6 +8,10 @@ huxerui::Bytes ExtractVideoCoverPng(std::string_view) {
   return {};
 }
 
+std::string LastCoverDiagnostic() {
+  return "cover extraction is not implemented for this platform";
+}
+
 void Install(huxerui::RootContext&) {}
 
 } // namespace lib_video_component

@@ -10,6 +10,7 @@
 
 using namespace huxerui;
 using lib_video_component::ExtractVideoCoverPng;
+using lib_video_component::LastCoverDiagnostic;
 
 namespace {
 
@@ -51,7 +52,7 @@ View CoverProbe() {
       const std::string path = target.Path();
       Bytes png = co_await RunWorker([](const std::string& source) { return ExtractVideoCoverPng(source); }, path);
       if (png.empty()) {
-        status = "cover unavailable on this platform";
+        status = "cover failed: " + LastCoverDiagnostic();
         co_return;
       }
       cover = ImageAsset::FromEncoded(std::move(png));

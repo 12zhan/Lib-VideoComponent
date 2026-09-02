@@ -11,6 +11,9 @@ namespace lib_video_component {
 // the platform cannot decode one. Blocks while decoding; call from a worker.
 [[nodiscard]] huxerui::Bytes ExtractVideoCoverPng(std::string_view path);
 
+// Human-readable reason for the most recent ExtractVideoCoverPng result.
+[[nodiscard]] std::string LastCoverDiagnostic();
+
 void Install(huxerui::RootContext& root);
 
 } // namespace lib_video_component

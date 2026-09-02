@@ -11,74 +11,110 @@
 using namespace huxerui;
 using lib_video_component::ExtractVideoCoverPng;
 using lib_video_component::LastCoverDiagnostic;
+using lib_video_component::Video;
+using lib_video_component::VideoEvents;
+using lib_video_component::VideoOptions;
+using lib_video_component::VideoSource;
+using lib_video_component::VideoStateEvent;
+using lib_video_component::VideoStatus;
 
 namespace {
 
-// Renders the first bytes as hex so the resource read is visibly verifiable.
-std::string HexHead(const std::span<const std::byte> bytes, std::size_t count) {
-  std::string text;
-  const std::size_t shown = bytes.size() < count ? bytes.size() : count;
-  for (std::size_t index = 0; index < shown; ++index) {
-    char buffer[8];
-    std::snprintf(buffer, sizeof(buffer), "%02X ", static_cast<unsigned>(bytes[index]));
-    text += buffer;
+const char* StatusLabel(VideoStatus status) {
+  switch (status) {
+  case VideoStatus::Idle:
+    return "Idle";
+  case VideoStatus::Preparing:
+    return "Preparing";
+  case VideoStatus::Playing:
+    return "Playing";
+  case VideoStatus::Paused:
+    return "Paused";
+  case VideoStatus::Completed:
+    return "Completed";
+  case VideoStatus::Failed:
+    return "Failed";
   }
-  return text;
+  return "Idle";
 }
 
-// Layered probe: raw resource bytes, a decoded cover frame, and image
-// rendering. Each step reports its own status so failures localize.
+// Extracts the packaged sample video once and plays it back: cover decode,
+// frame pipeline, and the Video component in one page. Each stage reports
+// its own status so failures localize.
 [[huxerui::composable]]
-View CoverProbe() {
-  auto status = UseState(std::string("starting"));
+View PlayerProbe() {
+  auto stage = UseState(std::string("starting"));
   auto cover = UseState(ImageAsset{});
+  auto source = UseState(std::optional<VideoSource>{});
+  auto playing = UseState(true);
+  auto status = UseState(std::string("Idle"));
   auto files = UseService<FileSystem>();
   auto tasks = UseTaskScope();
-  const RawAsset video = UseRawResource(app::raw::kuaishou_mp4);
-  const std::span<const std::byte> bytes = video.Bytes();
+  const RawAsset video_resource = UseRawResource(app::raw::kuaishou_mp4);
 
-  Lifecycle([status, cover, files, tasks, video] {
-    tasks.Launch([status, cover, files, video]() -> Task<void> {
+  Lifecycle([stage, cover, source, files, tasks, video_resource] {
+    tasks.Launch([stage, cover, source, files, video_resource]() -> Task<void> {
       const File target = File(files->Directories().cache_directory, "kuaishou.mp4");
       if (!target.Exists()) {
-        const auto source = video.Bytes();
-        const bool written = co_await target.WriteBytesAsync(Bytes(source.begin(), source.end()));
+        stage = "extracting";
+        const auto bytes = video_resource.Bytes();
+        const bool written = co_await target.WriteBytesAsync(Bytes(bytes.begin(), bytes.end()));
         if (!written) {
-          status = "cache write failed";
+          stage = "cache write failed";
           co_return;
         }
       }
-      status = "decoding cover";
+      stage = "decoding cover";
       const std::string path = target.Path();
-      Bytes png = co_await RunWorker([](const std::string& source) { return ExtractVideoCoverPng(source); }, path);
-      if (png.empty()) {
-        status = "cover failed: " + LastCoverDiagnostic();
-        co_return;
+      Bytes png = co_await RunWorker([](const std::string& source_path) { return ExtractVideoCoverPng(source_path); },
+                                     path);
+      if (!png.empty()) {
+        cover = ImageAsset::FromEncoded(std::move(png));
       }
-      cover = ImageAsset::FromEncoded(std::move(png));
-      status = "cover ready";
+      stage = "playing";
+      source = VideoSource{target.ToUri()};
     });
   });
 
-  View preview = Text(status.Get(), TextRole::Label);
-  if (cover.Get().EncodedBytes().empty() == false) {
-    preview = Image(cover.Get()).Fit(ImageFit::Contain).With(Frame{.height = 220.0F}, CornerRadius(8.0F));
+  View cover_view = Text("cover: " + LastCoverDiagnostic(), TextRole::Label);
+  if (!cover.Get().EncodedBytes().empty()) {
+    cover_view = Image(cover.Get()).Fit(ImageFit::Cover).With(Frame{.width = 96.0F, .height = 96.0F},
+                                                              CornerRadius(12.0F));
+  }
+
+  View player_view = Text(stage.Get(), TextRole::Label);
+  if (const std::optional<VideoSource> current = source.Get(); current.has_value()) {
+    player_view = Video(*current, playing, VideoOptions{.auto_play = true, .fit = ImageFit::Contain})
+                      .On<VideoEvents::StateChanged>([status](const VideoStateEvent& event) {
+                        std::string label = StatusLabel(event.status);
+                        if (!event.error.empty()) {
+                          label += ": " + event.error;
+                        }
+                        status = std::move(label);
+                      })
+                      .With(Frame{.height = 220.0F}, CornerRadius(8.0F), ClipChildren());
   }
 
   return Column {
-    Text("Lib-VideoComponent preview", TextRole::Title),
-    Text::Format("resource bytes: {}", std::to_string(bytes.size())),
-    Text::Format("first bytes: {}", HexHead(bytes, 16)),
-    std::move(preview),
-    Text::Format("status: {}", status),
-  }.With(Spacing(8.0F), Padding(24.0F), CrossAlign(CrossAxisAlignment::Start));
+    Row {
+      std::move(cover_view),
+      Column {
+        Text("Lib-VideoComponent preview", TextRole::Title),
+        Text::Format("status: {}", status),
+      }.With(Spacing(4.0F)),
+    }.With(Spacing(12.0F), CrossAlign(CrossAxisAlignment::Center)),
+    std::move(player_view),
+    Button(playing.Get() ? std::string("Pause") : std::string("Play")).OnClick([playing] {
+      playing = !playing.Get();
+    }),
+  }.With(Spacing(12.0F), Padding(24.0F), CrossAlign(CrossAxisAlignment::Stretch));
 }
 
 } // namespace
 
 View App() {
   return MaterialTheme {
-    CoverProbe(),
+    PlayerProbe(),
   };
 }
 

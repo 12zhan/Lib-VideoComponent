@@ -106,6 +106,3 @@ target_include_directories(lib_video_component PUBLIC
 )
 
 add_library(LibVideoComponent::LibVideoComponent ALIAS lib_video_component)
-
-include("${CMAKE_CURRENT_SOURCE_DIR}/3dparty/huxerui_3p.cmake")
-target_link_libraries(lib_video_component PRIVATE HuxerUI3p::miniaudio)

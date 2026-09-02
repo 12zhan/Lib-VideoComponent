@@ -1,7 +1,10 @@
 #include <huxerui/huxerui.h>
 #include <lib_video_component/lib_video_component.h>
 
+#include "crash_report.h"
+
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -44,6 +47,24 @@ const char* StatusLabel(VideoStatus status) {
 // Exercises the component framework: styles, events, controlled play state,
 // and a transport controller. The backend is a stub, so the surface shows the
 // styled placeholder and one Failed status transition.
+// Reads a previous crash report so failures surface without external logs.
+std::optional<std::string> ReadCrashReport(const File& cache_directory) {
+  const File report = File(cache_directory, "native_crash.txt");
+  if (!report.Exists()) {
+    return std::nullopt;
+  }
+  const FileResult<Bytes> bytes = report.ReadBytes();
+  if (!bytes.Succeeded()) {
+    return std::nullopt;
+  }
+  std::string text;
+  text.reserve(bytes.Value().size());
+  for (const std::byte value : bytes.Value()) {
+    text.push_back(static_cast<char>(value));
+  }
+  return text;
+}
+
 // Text::Format placeholders support only {}, so render decimals up front.
 std::string FormatSeconds(double value) {
   char buffer[32];
@@ -56,9 +77,21 @@ View PlayerSection() {
   auto playing = UseState(true);
   auto status = UseState(std::string("Idle"));
   auto duration = UseState(0.0);
+  auto files = UseService<FileSystem>();
   VideoController controller;
 
+  lib_video_component::preview::InstallCrashReporter(files->Directories().cache_directory.Path().c_str());
+  const std::optional<std::string> crash_report = ReadCrashReport(files->Directories().cache_directory);
+
+  View crash_view = Spacer();
+  if (crash_report.has_value() && !crash_report->empty()) {
+    crash_view = ScrollView {
+      Text(*crash_report).With(Foreground(Color::Rgb(190, 40, 40))),
+    }.With(Frame{.height = 160.0F});
+  }
+
   return Column {
+    std::move(crash_view),
     Video(SampleSource(), controller, playing, VideoOptions{.auto_play = true, .fit = ImageFit::Contain})
         .On<VideoEvents::StateChanged>([status](const VideoStateEvent& event) {
           std::string label = StatusLabel(event.status);
